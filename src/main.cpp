@@ -1,15 +1,17 @@
 // ============================================================
-// main.cpp  –  Alphasense B43F periodic ADC reader
+// main.cpp  –  Alphasense B43F via ADS1115 (I2C)
 // ESP32-S3 · Arduino framework · PlatformIO
 // ============================================================
 // What this firmware does
 // -----------------------
-//   • Reads NUM_ADC_CHANNELS ADC inputs (see config.h)
+//   • Initialises Wire (I2C) and the ADS1115 16-bit ADC
 //   • Every SAMPLE_INTERVAL_MS ms it:
-//       – oversample (OVERSAMPLING_COUNT reads, averaged)
-//       – apply calibration offset/gain
-//       – update a moving-average filter
-//       – print results over Serial (USB-CDC or UART)
+//       – reads WE (AIN0) and AE (AIN1) single-ended
+//         (or hardware differential if configured)
+//       – applies per-channel calibration offset/gain
+//       – computes signal = WE - AE
+//       – updates EMA (Exponential Moving Average) filter
+//       – prints a CSV row over Serial-CDC
 // ============================================================
 
 #include <Arduino.h>
@@ -20,7 +22,7 @@
 // Forward declarations
 // ------------------------------------------------------------
 static void printHeader();
-static void printChannelData(const ChannelData& d);
+static void printReading(const B43FReading& r);
 
 // ------------------------------------------------------------
 // setup()
@@ -29,26 +31,31 @@ void setup() {
     Serial.begin(SERIAL_BAUD);
 
     // Wait up to 3 s for the host to open the CDC port.
-    // On boards with hardware UART this returns immediately.
     unsigned long t0 = millis();
     while (!Serial && (millis() - t0) < 3000UL) { delay(10); }
 
     Serial.println(F("\n========================================"));
-    Serial.println(F("  Alphasense B43F ADC reader"));
+    Serial.println(F("  Alphasense B43F – ADS1115 I2C reader"));
     Serial.println(F("  ESP32-S3 / Arduino / PlatformIO"));
     Serial.println(F("========================================"));
-    Serial.printf("  Channels         : %d\n", NUM_ADC_CHANNELS);
+    Serial.printf("  I2C SDA          : GPIO%d\n", SDA_PIN);
+    Serial.printf("  I2C SCL          : GPIO%d\n", SCL_PIN);
+    Serial.printf("  ADS1115 address  : 0x%02X\n", ADS1115_I2C_ADDRESS);
+    Serial.printf("  WE channel       : AIN%d\n", ADS_CH_WE);
+    Serial.printf("  AE channel       : AIN%d\n", ADS_CH_AE);
+    Serial.printf("  Differential mode: %s\n",
+                  ADS1115_DIFFERENTIAL_MODE ? "YES (HW)" : "NO (SW WE-AE)");
+    Serial.printf("  EMA alpha        : %.2f\n", (float)EMA_ALPHA);
     Serial.printf("  Sample interval  : %u ms\n", SAMPLE_INTERVAL_MS);
-    Serial.printf("  Oversampling     : %u\n", OVERSAMPLING_COUNT);
-    Serial.printf("  Moving-avg window: %u\n", MOVING_AVG_SIZE);
-    Serial.printf("  ADC resolution   : %d bit\n", ADC_RESOLUTION_BITS);
-    Serial.printf("  Vref (full-scale): %.0f mV\n", VREF_MV);
     Serial.println(F("----------------------------------------"));
-    Serial.println(F("NOTE: voltages are estimates. Calibrate"));
-    Serial.println(F("      offset/gain in config.h before use."));
+    Serial.println(F("NOTE: voltages are estimates."));
+    Serial.println(F("      Set WE/AE offset+gain in config.h"));
+    Serial.println(F("      after calibration with reference."));
     Serial.println(F("========================================\n"));
 
-    alphasenseInit();
+    if (!adsInit()) {
+        Serial.println(F("[WARN] ADS1115 init failed. Will retry each sample."));
+    }
 
     printHeader();
 }
@@ -57,36 +64,40 @@ void setup() {
 // loop()
 // ------------------------------------------------------------
 void loop() {
-    static unsigned long lastSampleMs = 0;
+    static unsigned long lastMs = 0;
 
     unsigned long now = millis();
-    if (now - lastSampleMs < SAMPLE_INTERVAL_MS) return;
-    lastSampleMs = now;
+    if (now - lastMs < SAMPLE_INTERVAL_MS) return;
+    lastMs = now;
 
-    for (uint8_t ch = 0; ch < NUM_ADC_CHANNELS; ch++) {
-        ChannelData d = readChannel(ch);
-        printChannelData(d);
-    }
-    Serial.println();  // blank line between bursts
+    B43FReading r = adsRead();
+    printReading(r);
 }
 
 // ------------------------------------------------------------
 // printHeader()
-// Prints a CSV-style column header once at start-up.
+// CSV column header printed once at startup.
 // ------------------------------------------------------------
 static void printHeader() {
-    Serial.println(F("timestamp_ms, channel, adc_raw, voltage_mV, mavg_mV"));
+    Serial.println(F("timestamp_ms, we_raw, ae_raw, "
+                     "we_v, ae_v, signal_v, "
+                     "we_ema, ae_ema, signal_ema"));
 }
 
 // ------------------------------------------------------------
-// printChannelData()
-// Prints one row per channel in CSV format for easy logging.
+// printReading()
+// One CSV row per sample burst.
 // ------------------------------------------------------------
-static void printChannelData(const ChannelData& d) {
-    Serial.printf("%lu, CH%u, %4d, %7.2f, %7.2f\n",
+static void printReading(const B43FReading& r) {
+    if (!r.valid) {
+        Serial.printf("%lu, ERROR: ADS1115 not responding\n", millis());
+        return;
+    }
+    Serial.printf("%lu, %6d, %6d, "
+                  "%8.5f, %8.5f, %9.5f, "
+                  "%8.5f, %8.5f, %9.5f\n",
                   millis(),
-                  d.channel,
-                  d.adcRaw,
-                  d.voltageMV,
-                  d.movingAvgMV);
+                  (int)r.we_raw, (int)r.ae_raw,
+                  r.we_v,    r.ae_v,    r.signal_v,
+                  r.we_ema,  r.ae_ema,  r.signal_ema);
 }

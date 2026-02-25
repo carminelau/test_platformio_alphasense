@@ -1,134 +1,151 @@
 #pragma once
 // ============================================================
-// alphasense_b43f.h  –  Alphasense B4 Series (B43F) helpers
+// alphasense_b43f.h  –  Alphasense B43F via ADS1115 (I2C)
 // ============================================================
-// This header provides:
-//   • ChannelData struct      : per-channel measurement result
-//   • ADC initialisation
-//   • Oversampled ADC read
-//   • Moving-average filter
-//   • Voltage conversion with cal offset/gain
-//   • convertToConcentration() hook (TODO – requires cal data)
+// Provides:
+//   B43FReading struct   : WE/AE raw counts, calibrated
+//                          voltages, signal=WE-AE, EMA values
+//   adsInit()            : initialise Wire + ADS1115
+//   adsRead()            : acquire one burst, return reading
+//   convertToConcentration() : stub (TODO – needs cal data)
 //
-// All configuration is pulled from config.h.
+// Configuration is pulled from config.h.
+// Hardware: ADS1115 at I2C address ADS1115_I2C_ADDRESS,
+//           WE → AIN0 (ADS_CH_WE), AE → AIN1 (ADS_CH_AE).
 // ============================================================
 
 #include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_ADS1X15.h>
 #include "config.h"
 
 // ------------------------------------------------------------
-// Per-channel measurement result
+// Measurement result
 // ------------------------------------------------------------
-struct ChannelData {
-    uint8_t  channel;       // channel index (0-based)
-    int      adcRaw;        // latest oversampled raw ADC count
-    float    voltageMV;     // calibrated voltage in mV
-    float    movingAvgMV;   // moving-average filtered voltage (mV)
+struct B43FReading {
+    int16_t we_raw;       // WE raw ADS1115 count
+    int16_t ae_raw;       // AE raw ADS1115 count
+    float   we_v;         // WE calibrated voltage (V)
+    float   ae_v;         // AE calibrated voltage (V)
+    float   signal_v;     // Compensated signal = WE - AE (V)
+    float   we_ema;       // WE EMA-filtered voltage (V)
+    float   ae_ema;       // AE EMA-filtered voltage (V)
+    float   signal_ema;   // EMA-filtered signal (V)
+    bool    valid;        // false when I2C communication failed
 };
 
 // ------------------------------------------------------------
-// Moving-average state (one ring buffer per channel)
+// Module-private state
 // ------------------------------------------------------------
-static float    _mavgBuf[NUM_ADC_CHANNELS][MOVING_AVG_SIZE];
-static uint8_t  _mavgIdx[NUM_ADC_CHANNELS];
-static bool     _mavgFull[NUM_ADC_CHANNELS];
+static Adafruit_ADS1115 _ads;
+static bool    _adsOk    = false;
+static float   _weEma    = 0.0f;
+static float   _aeEma    = 0.0f;
+static bool    _emaInit  = false;
+static uint8_t _errCount = 0;
 
 // ------------------------------------------------------------
-// alphasenseInit()
-// Call once in setup(). Configures ADC resolution and
-// attenuation for every channel defined in ADC_PINS[].
+// adsInit()
+// Call once from setup().  Starts Wire on SDA_PIN/SCL_PIN,
+// sets PGA gain and data rate, and checks for the ADS1115.
+// Returns true if the device was found on the I2C bus.
 // ------------------------------------------------------------
-inline void alphasenseInit() {
-    analogReadResolution(ADC_RESOLUTION_BITS);
+inline bool adsInit() {
+    Wire.begin(SDA_PIN, SCL_PIN);
+    _ads.setGain(ADS1115_GAIN);
+    _ads.setDataRate(ADS1115_SPS);
+    _adsOk = _ads.begin(ADS1115_I2C_ADDRESS, &Wire);
+    if (!_adsOk) {
+        Serial.printf("[ADS1115] ERROR: not found at 0x%02X "
+                      "(SDA=GPIO%d, SCL=GPIO%d)\n",
+                      ADS1115_I2C_ADDRESS, SDA_PIN, SCL_PIN);
+    }
+    return _adsOk;
+}
 
-    for (uint8_t ch = 0; ch < NUM_ADC_CHANNELS; ch++) {
-        analogSetPinAttenuation(ADC_PINS[ch], ADC_ATTEN);
-        pinMode(ADC_PINS[ch], INPUT);
+// ------------------------------------------------------------
+// adsRead()
+// Reads WE and AE channels, applies calibration and EMA.
+// If the ADS1115 is not responding the reading is marked
+// invalid; a re-init attempt is made automatically after
+// I2C_MAX_RETRIES consecutive failures.
+// ------------------------------------------------------------
+inline B43FReading adsRead() {
+    B43FReading r = {};
+    r.valid = false;
 
-        // Initialise moving-average ring buffer
-        _mavgIdx[ch]  = 0;
-        _mavgFull[ch] = false;
-        for (uint8_t i = 0; i < MOVING_AVG_SIZE; i++) {
-            _mavgBuf[ch][i] = 0.0f;
+    // Re-init after repeated failures (non-blocking)
+    if (!_adsOk) {
+        _errCount++;
+        if (_errCount >= I2C_MAX_RETRIES) {
+            _errCount = 0;
+            Serial.println(F("[ADS1115] Retrying init..."));
+            _adsOk = _ads.begin(ADS1115_I2C_ADDRESS, &Wire);
+        }
+        if (!_adsOk) {
+            Serial.printf("[ADS1115] Not ready (attempt %u/%u)\n",
+                          _errCount, I2C_MAX_RETRIES);
+            return r;
         }
     }
-}
 
-// ------------------------------------------------------------
-// readOversampledRaw()
-// Returns the arithmetic mean of OVERSAMPLING_COUNT reads on
-// the requested channel pin (reduces random ADC noise).
-// ------------------------------------------------------------
-inline int readOversampledRaw(uint8_t ch) {
-    long sum = 0;
-    for (uint8_t i = 0; i < OVERSAMPLING_COUNT; i++) {
-        sum += analogRead(ADC_PINS[ch]);
+#if ADS1115_DIFFERENTIAL_MODE
+    // Hardware differential AIN0-AIN1 (single conversion)
+    int16_t diff   = _ads.readADC_Differential_0_1();
+    float   diff_v = _ads.computeVolts(diff);
+    r.we_raw   = diff;
+    r.ae_raw   = 0;
+    r.we_v     = diff_v;
+    r.ae_v     = 0.0f;
+    r.signal_v = diff_v;
+#else
+    // Single-ended: read A0 (WE) and A1 (AE) separately
+    r.we_raw       = _ads.readADC_SingleEnded(ADS_CH_WE);
+    r.ae_raw       = _ads.readADC_SingleEnded(ADS_CH_AE);
+    float we_raw_v = _ads.computeVolts(r.we_raw);
+    float ae_raw_v = _ads.computeVolts(r.ae_raw);
+    // Apply per-channel calibration (offset + gain)
+    r.we_v     = (we_raw_v - WE_OFFSET_V) * WE_GAIN_CAL;
+    r.ae_v     = (ae_raw_v - AE_OFFSET_V) * AE_GAIN_CAL;
+    r.signal_v = r.we_v - r.ae_v;
+#endif
+
+    // EMA filter
+    if (!_emaInit) {
+        _weEma  = r.we_v;
+        _aeEma  = r.ae_v;
+        _emaInit = true;
+    } else {
+        _weEma = EMA_ALPHA * r.we_v + (1.0f - EMA_ALPHA) * _weEma;
+        _aeEma = EMA_ALPHA * r.ae_v + (1.0f - EMA_ALPHA) * _aeEma;
     }
-    return (int)(sum / OVERSAMPLING_COUNT);
-}
+    r.we_ema     = _weEma;
+    r.ae_ema     = _aeEma;
+    r.signal_ema = _weEma - _aeEma;
 
-// ------------------------------------------------------------
-// rawToVoltageMV()
-// Converts a raw ADC count to millivolts, then applies the
-// per-channel calibration offset and gain from config.h.
-// ------------------------------------------------------------
-inline float rawToVoltageMV(uint8_t ch, int raw) {
-    float vRaw = (float)raw * ADC_MV_PER_COUNT;
-    return (vRaw - CAL_OFFSET_MV[ch]) * CAL_GAIN[ch];
-}
-
-// ------------------------------------------------------------
-// updateMovingAverage()
-// Pushes a new voltage sample into the ring buffer and returns
-// the current windowed mean.
-// ------------------------------------------------------------
-inline float updateMovingAverage(uint8_t ch, float newValMV) {
-    _mavgBuf[ch][_mavgIdx[ch]] = newValMV;
-    _mavgIdx[ch] = (_mavgIdx[ch] + 1) % MOVING_AVG_SIZE;
-    if (_mavgIdx[ch] == 0) _mavgFull[ch] = true;
-
-    uint8_t n = _mavgFull[ch] ? MOVING_AVG_SIZE : _mavgIdx[ch];
-    if (n == 0) return newValMV;
-
-    float sum = 0.0f;
-    for (uint8_t i = 0; i < n; i++) sum += _mavgBuf[ch][i];
-    return sum / (float)n;
-}
-
-// ------------------------------------------------------------
-// readChannel()
-// High-level function: oversample → convert → moving average.
-// Fills a ChannelData struct and returns it.
-// ------------------------------------------------------------
-inline ChannelData readChannel(uint8_t ch) {
-    ChannelData d;
-    d.channel      = ch;
-    d.adcRaw       = readOversampledRaw(ch);
-    d.voltageMV    = rawToVoltageMV(ch, d.adcRaw);
-    d.movingAvgMV  = updateMovingAverage(ch, d.voltageMV);
-    return d;
+    r.valid   = true;
+    _errCount = 0;
+    return r;
 }
 
 // ------------------------------------------------------------
 // convertToConcentration()
-// TODO: implement once Alphasense sensitivity (nA/ppb) and the
-//       full analogue signal chain (TIA gain, Vref, offset)
-//       have been characterised / calibrated for your specific
-//       B43F unit.
+// TODO: implement once the full analogue signal chain
+//       (TIA gain, Alphasense sensitivity nA/ppb, zero offset)
+//       has been characterised for your specific B43F unit.
 //
-// Inputs:
-//   voltageMV  – calibrated output voltage in mV
-//   channel    – channel index (in case sensitivities differ)
+// References:
+//   Alphasense AAN 803 – B4 series circuit description
+//   Alphasense AAN 110 – Individual sensor board (ISB) setup
 //
-// Returns: concentration in ppb (currently always 0.0)
+// Steps (to be filled in):
+//   1. Remove baseline voltage (zero-air / clean-air offset)
+//   2. current_A = signal_v / TIA_GAIN_OHM
+//   3. ppb = current_A / SENSITIVITY_A_PER_PPB
+//   4. Apply temperature compensation if required
 // ------------------------------------------------------------
-inline float convertToConcentration(float voltageMV, uint8_t channel) {
-    (void)voltageMV;
+inline float convertToConcentration(float signal_v, uint8_t channel) {
+    (void)signal_v;
     (void)channel;
-    // TODO:
-    //   1. Subtract baseline / zero-current voltage
-    //   2. Divide by TIA gain (Ω) to recover current (A)
-    //   3. Divide by sensitivity (A/ppb from datasheet)
-    //   4. Apply temperature compensation if required
     return 0.0f;
 }

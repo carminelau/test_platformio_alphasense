@@ -1,101 +1,116 @@
 #pragma once
 // ============================================================
-// config.h  –  Alphasense B43F ADC reader configuration
+// config.h  –  Alphasense B43F via ADS1115 (I2C) configuration
 // ============================================================
-// Edit this file to match your actual hardware wiring and
-// measurement requirements.
-// All values that say "SOSTITUIRE CON PIN REALI" MUST be
-// replaced with the real GPIO numbers before flashing.
+// Edit this file to match your actual hardware wiring.
+// All values marked "!! SOSTITUIRE !!" MUST be verified
+// against your custom board schematic before flashing.
+//
+// I2C pin defaults match the FirmwareSensy sensy_2024 V3/V4
+// ESP32-S3 build_flags (-DSDA_PIN=8 -DSCL_PIN=9).
+// Override via build_flags in platformio.ini if using a
+// different board variant (e.g. V1: SDA=1, SCL=2).
 // ============================================================
 
 // ------------------------------------------------------------
-// ADC channel count
-// Add more entries in ADC_PINS[] to extend to N channels.
+// I2C bus pins
+// From FirmwareSensy platformio.ini:
+//   sensy_2024_V1_green : SDA=1,  SCL=2
+//   sensy_2024_V2_ENEA  : SDA=8,  SCL=9
+//   sensy_2024_V3_red   : SDA=8,  SCL=9  ← default
+//   sensy_2024_V4_green : SDA=8,  SCL=9
+// !! SOSTITUIRE se la tua board usa pin diversi !!
 // ------------------------------------------------------------
-#define NUM_ADC_CHANNELS  2
+#ifndef SDA_PIN
+#define SDA_PIN  8
+#endif
+#ifndef SCL_PIN
+#define SCL_PIN  9
+#endif
 
 // ------------------------------------------------------------
-// ADC pin assignments
-// !! SOSTITUIRE CON PIN REALI !!
-// On ESP32-S3 only GPIOs on ADC1 (GPIO1–GPIO10) or
-// ADC2 (GPIO11–GPIO20) can be used. ADC2 cannot be used
-// while Wi-Fi is active. Prefer ADC1.
+// ADS1115 I2C address
+// ADDR pin → GND  : 0x48  (default)
+// ADDR pin → VDD  : 0x49
+// ADDR pin → SDA  : 0x4A
+// ADDR pin → SCL  : 0x4B
 // ------------------------------------------------------------
-static const int ADC_PINS[NUM_ADC_CHANNELS] = {
-    4,   // CH0 – Working electrode output  !! SOSTITUIRE !!
-    5    // CH1 – Auxiliary electrode output !! SOSTITUIRE !!
-};
+#define ADS1115_I2C_ADDRESS   0x48
 
 // ------------------------------------------------------------
-// ADC resolution & attenuation
-// Resolution: 9–12 bits (default 12 on ESP32-S3 Arduino)
-// Attenuation options (arduino-esp32):
-//   ADC_0db   → 0–800 mV  (best accuracy)
-//   ADC_2_5db → 0–1100 mV
-//   ADC_6db   → 0–1350 mV
-//   ADC_11db  → 0–2600 mV  (use if Alphasense output ≤ 2.6 V)
-// The Alphasense ISB outputs are typically 0–2 V @ 3.3 V supply.
-// Adjust ADC_ATTEN if your Alphasense interface board scales
-// differently.
+// ADS1115 channel mapping (validate against custom board PCB)
+// WE (Working Electrode output)    → AIN0
+// AE (Auxiliary Electrode output)  → AIN1
+// !! SOSTITUIRE se la board mappa diversamente !!
 // ------------------------------------------------------------
-#define ADC_RESOLUTION_BITS   12
-#define ADC_ATTEN             ADC_11db   // covers 0–2600 mV
+#define ADS_CH_WE   0   // AIN0 = WE
+#define ADS_CH_AE   1   // AIN1 = AE
 
 // ------------------------------------------------------------
-// Reference voltage (mV)
-// ESP32-S3 has an internal ~1100 mV Vref, but when using
-// ADC_11db the effective full-scale is ~2600 mV.
-// If you have measured your specific chip's Vref, put it here.
-// See esp_adc_cal for runtime calibration.
+// ADS1115 PGA gain
+// GAIN_TWOTHIRDS → ±6.144 V  (0.1875 mV/bit)
+// GAIN_ONE       → ±4.096 V  (0.125  mV/bit)
+// GAIN_TWO       → ±2.048 V  (0.0625 mV/bit)  ← recommended
+// GAIN_FOUR      → ±1.024 V  (0.03125 mV/bit)
+// GAIN_EIGHT     → ±0.512 V
+// GAIN_SIXTEEN   → ±0.256 V
+//
+// Alphasense ISB Rev5 outputs are nominally 0–~2 V @ 3.3 V.
+// TODO: verify actual output range with oscilloscope before
+//       changing to a tighter gain setting.
 // ------------------------------------------------------------
-#define VREF_MV               2600.0f    // mV at ADC full-scale
+#define ADS1115_GAIN   GAIN_TWO   // ±2.048 V
 
 // ------------------------------------------------------------
-// Conversion to volts
-// Voltage (V) = (raw / ADC_FULL_SCALE) * (VREF_MV / 1000)
-// ADC_FULL_SCALE = 2^ADC_RESOLUTION_BITS - 1
+// ADS1115 data rate (samples per second)
+// Options: RATE_ADS1115_8SPS  16  32  64  128  250  475  860
 // ------------------------------------------------------------
-#define ADC_FULL_SCALE        ((float)((1 << ADC_RESOLUTION_BITS) - 1))
-#define ADC_MV_PER_COUNT      (VREF_MV / ADC_FULL_SCALE)
+#define ADS1115_SPS    RATE_ADS1115_128SPS
 
 // ------------------------------------------------------------
-// Calibration offset and gain (per channel)
-// voltage_cal = (voltage_raw - OFFSET_MV[ch]) * GAIN[ch]
-// Start with offset=0, gain=1 and refine with a calibrated
-// voltage reference after full system characterisation.
+// Acquisition mode
+// 0 = single-ended A0 and A1, then compute WE-AE in software
+// 1 = hardware differential AIN0-AIN1 (single read)
+// Start with 0 to diagnose each channel individually.
+// ------------------------------------------------------------
+#define ADS1115_DIFFERENTIAL_MODE   0
+
+// ------------------------------------------------------------
+// Calibration offset and gain (per channel, in Volts)
+// voltage_cal = (voltage_raw_V - OFFSET_V) * GAIN_CAL
+// Measure with a precision reference and update these values.
 // !! SOSTITUIRE CON VALORI CALIBRATI !!
 // ------------------------------------------------------------
-static const float CAL_OFFSET_MV[NUM_ADC_CHANNELS] = {0.0f, 0.0f};
-static const float CAL_GAIN[NUM_ADC_CHANNELS]       = {1.0f, 1.0f};
+#define WE_OFFSET_V    0.0f
+#define WE_GAIN_CAL    1.0f
+#define AE_OFFSET_V    0.0f
+#define AE_GAIN_CAL    1.0f
 
 // ------------------------------------------------------------
-// Sampling timing
-// SAMPLE_INTERVAL_MS : period between acquisition bursts (ms)
-// Can also be overridden at compile time via build_flags.
+// EMA (Exponential Moving Average) filter
+// alpha = 1.0 → no filtering (raw values)
+// alpha = 0.1 → strong smoothing (10-sample effective window)
+// Can be overridden at compile time via build_flags.
+// ------------------------------------------------------------
+#ifndef EMA_ALPHA
+#define EMA_ALPHA      0.1f
+#endif
+
+// ------------------------------------------------------------
+// Sampling interval (ms between acquisitions)
+// Can be overridden at compile time via build_flags.
 // ------------------------------------------------------------
 #ifndef SAMPLE_INTERVAL_MS
-#define SAMPLE_INTERVAL_MS    500U   // ms
+#define SAMPLE_INTERVAL_MS   1000U
 #endif
 
 // ------------------------------------------------------------
-// Oversampling
-// Each reported sample is the mean of OVERSAMPLING_COUNT
-// consecutive ADC reads (hardware noise averaging).
-// Effective ENOB ≈ ADC_RESOLUTION_BITS + log2(N)/2
+// I2C error recovery
 // ------------------------------------------------------------
-#ifndef OVERSAMPLING_COUNT
-#define OVERSAMPLING_COUNT    16U
-#endif
-
-// ------------------------------------------------------------
-// Moving average window size (software low-pass filter)
-// Larger = smoother output, more latency.
-// ------------------------------------------------------------
-#ifndef MOVING_AVG_SIZE
-#define MOVING_AVG_SIZE       8U
-#endif
+#define I2C_RETRY_DELAY_MS   500U
+#define I2C_MAX_RETRIES      5U
 
 // ------------------------------------------------------------
 // Serial baud rate
 // ------------------------------------------------------------
-#define SERIAL_BAUD           115200
+#define SERIAL_BAUD   115200
