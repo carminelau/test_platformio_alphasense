@@ -174,27 +174,27 @@ See Alphasense application notes **AAN 803** (B4 series circuit) and
        │
        ├─────────────────────────────────────────────────┐
        │                                                 │
-  ┌────┴──────────────────────────────┐     ┌───────────┴──────────────┐
+  ┌────┴──────────────────────────────┐     ┌────────────┴─────────────┐
   │   Alphasense ISB Rev5 4-Elec      │     │   ADS1115 (I2C, 16-bit)  │
   │   (custom board)                  │     │                          │
-  │                                   │     │  AIN0 ◄── ISB WE out ⚠  │
-  │  [B43F Sensor]─WE out ───────────►│─────► AIN0                    │
-  │              ─AE out ───────────►│─────► AIN1 ◄── ISB AE out ⚠  │
+  │                                   │     │  AIN0 ◄── ISB WE out     │
+  │ [B43F Sensor] -WE out ───────────►│─────►  AIN0                    │
+  │               -AE out ───────────►│─────►  AIN1 ◄── ISB AE out     │
   │                                   │     │                          │
-  │  GND ─────────────────────────────│─────► GND                     │
-  └───────────────────────────────────┘     │  VDD ◄── 3.3 V          │
-                                            │  SCL ◄── ESP32 GPIO9 ⚠  │
-                                            │  SDA ◄── ESP32 GPIO8 ⚠  │
-                                            │  ADDR → GND (addr 0x48) │
+  │  GND ─────────────────────────────│─────►  GND                     │
+  └───────────────────────────────────┘     │  VDD ◄── 3.3 V           │
+                                            │  SCL ◄── ESP32 GPIO9     │
+                                            │  SDA ◄── ESP32 GPIO8     │
+                                            │  ADDR → GND (addr 0x48)  │
                                             └──────────┬───────────────┘
                                                        │ I2C
                                           ┌────────────┴─────────┐
-                                          │  ESP32-S3 DevKit      │
-                                          │  GPIO8  = SDA ⚠       │
-                                          │  GPIO9  = SCL ⚠       │
-                                          │  3V3    → ADS1115 VDD │
-                                          │  GND    → common GND  │
-                                          └───────────────────────┘
+                                          │  ESP32-S3 DevKit     │
+                                          │  GPIO8  = SDA        │
+                                          │  GPIO9  = SCL        │
+                                          │  3V3    → ADS1115 VDD│
+                                          │  GND    → common GND │
+                                          └──────────────────────┘
 ```
 
 > ⚠ All GPIO numbers and ISB connector labels are **placeholders** based on
